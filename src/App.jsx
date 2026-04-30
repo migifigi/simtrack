@@ -3,7 +3,8 @@ import {
   Plus, Trash2, Download, ChevronLeft, ChevronRight,
   Settings as SettingsIcon, Eraser, Edit3,
   BarChart3, X, Clock, Tag as TagIcon, FileText,
-  AlertCircle, User
+  AlertCircle, User, Lock, Unlock, Shield, Cloud, CloudOff,
+  RefreshCw, Check, KeyRound
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
@@ -38,6 +39,10 @@ const COLOR_PALETTE = [
 ];
 
 const STORAGE_KEY = "simond-suivi-v4";
+const DEFAULT_ADMIN_PASSWORD = "simond2026";
+const ADMIN_SESSION_DURATION = 30 * 60 * 1000; // 30 minutes
+const ADMIN_TAP_COUNT = 5;
+const ADMIN_TAP_WINDOW = 3000; // 3 sec pour faire les 5 taps
 
 // =================== UTILS ===================
 
@@ -118,6 +123,19 @@ export default function App() {
   const [settings, setSettings] = useState(initial.settings || { startHour: 6, endHour: 19, slotMinutes: 30 });
   const [userName, setUserName] = useState(initial.userName || "");
 
+  // Admin state
+  const [adminPassword, setAdminPassword] = useState(initial.adminPassword || DEFAULT_ADMIN_PASSWORD);
+  const [adminSessionUntil, setAdminSessionUntil] = useState(0);
+  const [unlockedDates, setUnlockedDates] = useState(initial.unlockedDates || []);
+  const [syncUrl, setSyncUrl] = useState(initial.syncUrl || "");
+  const [syncStatus, setSyncStatus] = useState("idle");
+  const [lastSyncAt, setLastSyncAt] = useState(null);
+
+  const isAdminActive = adminSessionUntil > Date.now();
+  const isCurrentDateNotToday = currentDate !== todayISO();
+  const isDateUnlocked = unlockedDates.includes(currentDate);
+  const isDateLocked = isCurrentDateNotToday && !isAdminActive && !isDateUnlocked;
+
   const [editingTag, setEditingTag] = useState(null);
   const [showAddTag, setShowAddTag] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -126,6 +144,11 @@ export default function App() {
   const [eraseMode, setEraseMode] = useState(false);
   const [analyticsRange, setAnalyticsRange] = useState("day");
   const [activeTab, setActiveTab] = useState("saisie");
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+
+  // Admin tap counter
+  const tapCount = useRef(0);
+  const tapTimer = useRef(null);
 
   const slots = useMemo(
     () => generateSlots(settings.startHour, settings.endHour, settings.slotMinutes),
@@ -140,10 +163,117 @@ export default function App() {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      saveState({ tags, activeTagId, daysData, settings, userName });
+      saveState({ tags, activeTagId, daysData, settings, userName, adminPassword, unlockedDates, syncUrl });
     }, 300);
     return () => clearTimeout(timer);
-  }, [tags, activeTagId, daysData, settings, userName]);
+  }, [tags, activeTagId, daysData, settings, userName, adminPassword, unlockedDates, syncUrl]);
+
+  // Tap handler caché pour activer l'admin
+  const handleSecretTap = useCallback(() => {
+    tapCount.current += 1;
+    if (tapTimer.current) clearTimeout(tapTimer.current);
+    tapTimer.current = setTimeout(() => {
+      tapCount.current = 0;
+    }, ADMIN_TAP_WINDOW);
+
+    if (tapCount.current >= ADMIN_TAP_COUNT) {
+      tapCount.current = 0;
+      if (tapTimer.current) clearTimeout(tapTimer.current);
+      if (isAdminActive) {
+        // Si déjà admin, ouvrir directement les paramètres
+        setShowSettings(true);
+      } else {
+        setShowAdminLogin(true);
+      }
+    }
+  }, [isAdminActive]);
+
+  // Tentative de connexion admin
+  const tryAdminLogin = useCallback((password) => {
+    if (password === adminPassword) {
+      setAdminSessionUntil(Date.now() + ADMIN_SESSION_DURATION);
+      setShowAdminLogin(false);
+      return true;
+    }
+    return false;
+  }, [adminPassword]);
+
+  // Déconnexion admin manuelle
+  const logoutAdmin = useCallback(() => {
+    setAdminSessionUntil(0);
+  }, []);
+
+  // Auto-déconnexion admin à expiration
+  useEffect(() => {
+    if (!isAdminActive) return;
+    const remaining = adminSessionUntil - Date.now();
+    if (remaining <= 0) return;
+    const timer = setTimeout(() => {
+      setAdminSessionUntil(0);
+    }, remaining);
+    return () => clearTimeout(timer);
+  }, [adminSessionUntil, isAdminActive]);
+
+  // Déverrouiller la date courante (admin only)
+  const unlockCurrentDate = useCallback(() => {
+    if (!isAdminActive) return;
+    setUnlockedDates(prev => {
+      if (prev.includes(currentDate)) return prev;
+      return [...prev, currentDate];
+    });
+  }, [isAdminActive, currentDate]);
+
+  // ---------- Cloud sync ----------
+  const syncTimeout = useRef(null);
+
+  const syncToCloud = useCallback(async () => {
+    if (!syncUrl || !userName) return;
+    setSyncStatus("syncing");
+    try {
+      const dayPayload = daysData[currentDate] || {};
+      const entries = Object.entries(dayPayload).map(([idx, tagId]) => {
+        const i = parseInt(idx);
+        const tag = tags.find(t => t.id === tagId);
+        const start = slots[i];
+        const endMin = settings.startHour * 60 + (i + 1) * settings.slotMinutes;
+        const eh = Math.floor(endMin / 60);
+        const em = endMin % 60;
+        const end = `${String(eh).padStart(2,"0")}:${String(em).padStart(2,"0")}`;
+        return {
+          idx: i, start, end,
+          duration: settings.slotMinutes,
+          tagName: tag?.name || "(inconnu)",
+          tagColor: tag?.color || "#000000",
+        };
+      });
+      const res = await fetch(syncUrl, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "save", user: userName, date: currentDate, entries }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setSyncStatus("success");
+        setLastSyncAt(new Date());
+      } else {
+        setSyncStatus("error");
+      }
+    } catch (e) {
+      setSyncStatus("error");
+    }
+  }, [syncUrl, userName, daysData, currentDate, tags, slots, settings]);
+
+  // Auto-sync debounced
+  useEffect(() => {
+    if (!syncUrl || !userName) return;
+    if (syncTimeout.current) clearTimeout(syncTimeout.current);
+    syncTimeout.current = setTimeout(() => {
+      syncToCloud();
+    }, 2000);
+    return () => {
+      if (syncTimeout.current) clearTimeout(syncTimeout.current);
+    };
+  }, [daysData, currentDate, syncUrl, userName, syncToCloud]);
 
   const goToPreviousDay = useCallback(() => {
     setCurrentDate(prev => shiftDate(prev, -1));
@@ -161,6 +291,7 @@ export default function App() {
   const lastTouchedSlot = useRef(null);
 
   const setSlot = useCallback((slotIdx, tagId) => {
+    if (isDateLocked) return; // Blocage en mode lecture seule
     setDaysData(prev => {
       const day = { ...(prev[currentDate] || {}) };
       if (tagId === null) {
@@ -170,7 +301,7 @@ export default function App() {
       }
       return { ...prev, [currentDate]: day };
     });
-  }, [currentDate]);
+  }, [currentDate, isDateLocked]);
 
   const handleSlotPaint = useCallback((slotIdx) => {
     if (eraseMode) {
@@ -376,14 +507,22 @@ export default function App() {
               </div>
             </div>
             <div className="flex items-center gap-1.5 flex-shrink-0">
+              {syncUrl && userName && <SyncIndicator status={syncStatus} lastSyncAt={lastSyncAt} />}
               <button
                 type="button"
                 onClick={() => setShowSettings(true)}
-                className="p-2 rounded border transition"
+                className="p-2 rounded border transition relative"
                 style={{ borderColor: BORDER, color: NAVY, background: "white" }}
                 aria-label="Paramètres"
               >
                 <SettingsIcon size={16} style={{ pointerEvents: "none" }} />
+                {isAdminActive && (
+                  <span
+                    className="absolute -top-1 -right-1 w-3 h-3 rounded-full"
+                    style={{ background: ORANGE, border: "2px solid white" }}
+                    title="Mode admin actif"
+                  />
+                )}
               </button>
               <button
                 type="button"
@@ -403,6 +542,9 @@ export default function App() {
             onNext={goToNextDay}
             onToday={goToToday}
             onPickDate={setCurrentDate}
+            onSecretTap={handleSecretTap}
+            isLocked={isDateLocked}
+            isAdminActive={isAdminActive}
           />
         </div>
       </header>
@@ -436,6 +578,11 @@ export default function App() {
             dayMinutes={dayMinutes}
             clearDay={clearDay}
             eraseSlot={eraseSlot}
+            isLocked={isDateLocked}
+            isAdminActive={isAdminActive}
+            onUnlockDate={unlockCurrentDate}
+            onLogoutAdmin={logoutAdmin}
+            currentDate={currentDate}
           />
         </main>
 
@@ -501,7 +648,21 @@ export default function App() {
           setSettings={setSettings}
           userName={userName}
           setUserName={setUserName}
+          isAdminActive={isAdminActive}
+          adminPassword={adminPassword}
+          setAdminPassword={setAdminPassword}
+          syncUrl={syncUrl}
+          setSyncUrl={setSyncUrl}
+          unlockedDates={unlockedDates}
+          setUnlockedDates={setUnlockedDates}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {showAdminLogin && (
+        <AdminLoginModal
+          onTryLogin={tryAdminLogin}
+          onClose={() => setShowAdminLogin(false)}
         />
       )}
 
@@ -517,7 +678,7 @@ export default function App() {
 
 // =================== DATE NAVIGATOR ===================
 
-function DateNavigator({ currentDate, onPrev, onNext, onToday, onPickDate }) {
+function DateNavigator({ currentDate, onPrev, onNext, onToday, onPickDate, onSecretTap, isLocked, isAdminActive }) {
   const isToday = currentDate === todayISO();
   return (
     <div className="mt-3 pt-3 border-t flex items-center gap-2" style={{ borderColor: BORDER }}>
@@ -532,9 +693,17 @@ function DateNavigator({ currentDate, onPrev, onNext, onToday, onPickDate }) {
       </button>
 
       <div className="flex-1 min-w-0 text-center">
-        <div className="font-semibold capitalize text-sm lg:text-base truncate" style={{ color: NAVY }}>
-          {formatDateFR(currentDate)}
-        </div>
+        <button
+          type="button"
+          onClick={onSecretTap}
+          className="font-semibold capitalize text-sm lg:text-base truncate w-full text-center inline-flex items-center justify-center gap-1.5"
+          style={{ color: NAVY, background: "transparent", border: "none", cursor: "default" }}
+          aria-label="Date courante"
+        >
+          {isLocked && <Lock size={12} style={{ color: TEXT_DIM, pointerEvents: "none" }} />}
+          {isAdminActive && !isLocked && <Shield size={12} style={{ color: ORANGE, pointerEvents: "none" }} />}
+          <span className="pointer-events-none">{formatDateFR(currentDate)}</span>
+        </button>
         <div className="flex items-center justify-center gap-2 mt-1 flex-wrap">
           <input
             type="date"
@@ -681,8 +850,16 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
 
 // =================== TIME GRID ===================
 
-function TimeGridPanel({ slots, settings, dayData, tagById, handleSlotMouseDown, handleSlotMouseEnter, eraseMode, dayMinutes, clearDay, eraseSlot }) {
+function TimeGridPanel({ slots, settings, dayData, tagById, handleSlotMouseDown, handleSlotMouseEnter, eraseMode, dayMinutes, clearDay, eraseSlot, isLocked, isAdminActive, onUnlockDate, onLogoutAdmin, currentDate }) {
   const totalDayMin = slots.length * settings.slotMinutes;
+  const isPast = currentDate < todayISO();
+  const isFuture = currentDate > todayISO();
+  const lockMessage = isPast
+    ? "Ce jour est passé et ne peut plus être modifié."
+    : isFuture
+    ? "Ce jour n'est pas encore arrivé. La saisie sera disponible le jour-même."
+    : "Ce jour ne peut pas être modifié.";
+
   return (
     <div className="rounded-lg border" style={{ background: "white", borderColor: BORDER }}>
       <div className="px-4 py-2 flex items-center justify-between text-xs border-b" style={{ background: LIGHT, borderColor: BORDER }}>
@@ -690,7 +867,7 @@ function TimeGridPanel({ slots, settings, dayData, tagById, handleSlotMouseDown,
           <Clock size={12} />
           <span><strong style={{ color: NAVY }}>{minutesToHours(dayMinutes)}</strong> sur {minutesToHours(totalDayMin)}</span>
         </div>
-        {Object.keys(dayData).length > 0 && (
+        {Object.keys(dayData).length > 0 && !isLocked && (
           <button
             type="button"
             onClick={clearDay}
@@ -703,11 +880,35 @@ function TimeGridPanel({ slots, settings, dayData, tagById, handleSlotMouseDown,
         )}
       </div>
 
-      <div className="px-4 py-2 text-xs border-b" style={{ background: `${ORANGE}08`, borderColor: BORDER, color: TEXT_DIM }}>
-        💡 <strong style={{ color: NAVY }}>Astuce :</strong> cliquer sur le ❌ d'un créneau pour l'effacer
-      </div>
+      {isLocked ? (
+        <div className="px-4 py-3 text-xs border-b flex items-center justify-between gap-2" style={{ background: `${TEXT_DIM}10`, borderColor: BORDER }}>
+          <div className="flex items-center gap-2" style={{ color: TEXT_DIM }}>
+            <Lock size={14} />
+            <span><strong style={{ color: NAVY }}>Lecture seule.</strong> {lockMessage}</span>
+          </div>
+        </div>
+      ) : isAdminActive ? (
+        <div className="px-4 py-2 text-xs border-b flex items-center justify-between gap-2 flex-wrap" style={{ background: `${ORANGE}15`, borderColor: BORDER }}>
+          <div className="flex items-center gap-2" style={{ color: NAVY }}>
+            <Shield size={14} style={{ color: ORANGE }} />
+            <span><strong>Mode admin actif.</strong> Édition autorisée.</span>
+          </div>
+          <button
+            type="button"
+            onClick={onLogoutAdmin}
+            className="text-xs px-2 py-0.5 rounded font-medium"
+            style={{ background: NAVY, color: "white" }}
+          >
+            Quitter admin
+          </button>
+        </div>
+      ) : (
+        <div className="px-4 py-2 text-xs border-b" style={{ background: `${ORANGE}08`, borderColor: BORDER, color: TEXT_DIM }}>
+          💡 <strong style={{ color: NAVY }}>Astuce :</strong> cliquer sur le ❌ d'un créneau pour l'effacer
+        </div>
+      )}
 
-      <div className="p-3 lg:p-4 select-none">
+      <div className={`p-3 lg:p-4 select-none ${isLocked ? "opacity-60" : ""}`}>
         <div className="grid grid-cols-1 gap-1">
           {slots.map((slotLabel, idx) => (
             <SlotRow
@@ -719,15 +920,38 @@ function TimeGridPanel({ slots, settings, dayData, tagById, handleSlotMouseDown,
               handleSlotMouseEnter={handleSlotMouseEnter}
               eraseMode={eraseMode}
               eraseSlot={eraseSlot}
+              isLocked={isLocked}
             />
           ))}
         </div>
+
+        {isLocked && isAdminActive === false && (
+          <div className="mt-3 text-center">
+            <p className="text-xs" style={{ color: TEXT_DIM }}>
+              Pour modifier ce jour, activer le mode admin.
+            </p>
+          </div>
+        )}
+
+        {isAdminActive && (
+          <div className="mt-3 flex justify-center">
+            <button
+              type="button"
+              onClick={onUnlockDate}
+              className="text-xs px-3 py-1.5 rounded font-medium flex items-center gap-2 border"
+              style={{ borderColor: ORANGE, color: ORANGE, background: "white" }}
+            >
+              <Unlock size={12} />
+              Déverrouiller ce jour de façon permanente
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function SlotRow({ idx, slotLabel, tag, handleSlotMouseDown, handleSlotMouseEnter, eraseMode, eraseSlot }) {
+function SlotRow({ idx, slotLabel, tag, handleSlotMouseDown, handleSlotMouseEnter, eraseMode, eraseSlot, isLocked }) {
   const isHourMark = slotLabel.endsWith(":00");
 
   return (
@@ -744,13 +968,16 @@ function SlotRow({ idx, slotLabel, tag, handleSlotMouseDown, handleSlotMouseEnte
       <div className="flex-1 flex items-stretch gap-1">
         <button
           type="button"
-          onMouseDown={() => handleSlotMouseDown(idx)}
-          onMouseEnter={() => handleSlotMouseEnter(idx)}
+          disabled={isLocked}
+          onMouseDown={() => !isLocked && handleSlotMouseDown(idx)}
+          onMouseEnter={() => !isLocked && handleSlotMouseEnter(idx)}
           onTouchStart={(e) => {
+            if (isLocked) return;
             e.preventDefault();
             handleSlotMouseDown(idx);
           }}
           onTouchMove={(e) => {
+            if (isLocked) return;
             e.preventDefault();
             const touch = e.touches[0];
             const el = document.elementFromPoint(touch.clientX, touch.clientY);
@@ -766,18 +993,18 @@ function SlotRow({ idx, slotLabel, tag, handleSlotMouseDown, handleSlotMouseEnte
             color: tag ? "white" : TEXT_DIM,
             borderColor: tag ? tag.color : BORDER,
             fontWeight: tag ? 500 : 400,
-            cursor: eraseMode ? "crosshair" : "pointer",
+            cursor: isLocked ? "not-allowed" : (eraseMode ? "crosshair" : "pointer"),
           }}
         >
           {tag ? (
             <span className="truncate flex-1 pointer-events-none">{tag.name}</span>
           ) : (
             <span className="text-xs italic opacity-60 pointer-events-none">
-              {eraseMode ? "Toucher pour effacer" : "Toucher pour assigner"}
+              {isLocked ? "—" : (eraseMode ? "Toucher pour effacer" : "Toucher pour assigner")}
             </span>
           )}
         </button>
-        {tag && (
+        {tag && !isLocked && (
           <button
             type="button"
             onClick={() => eraseSlot(idx)}
@@ -995,76 +1222,116 @@ function AddTagModal({ onClose, onAdd }) {
   );
 }
 
-function SettingsModal({ settings, setSettings, userName, setUserName, onClose }) {
+function SettingsModal({ settings, setSettings, userName, setUserName, isAdminActive, adminPassword, setAdminPassword, syncUrl, setSyncUrl, unlockedDates, setUnlockedDates, onClose }) {
+  const [section, setSection] = useState("general");
+
   return (
     <Modal title="Paramètres" onClose={onClose} wide>
       <div className="space-y-4">
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-            <User size={12} className="inline mr-1" /> Nom de l'utilisateur
-          </label>
-          <input
-            type="text"
-            value={userName}
-            onChange={(e) => setUserName(e.target.value)}
-            className="w-full px-3 py-2 border rounded text-sm"
-            style={{ borderColor: BORDER }}
+        <div className="flex gap-1 p-1 rounded" style={{ background: LIGHT }}>
+          {[
+            { id: "general", label: "Général" },
+            { id: "grid", label: "Grille" },
+            ...(isAdminActive ? [{ id: "admin", label: "⚡ Admin" }] : []),
+          ].map(s => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => setSection(s.id)}
+              className="flex-1 text-xs py-1.5 rounded font-medium transition"
+              style={{
+                background: section === s.id ? "white" : "transparent",
+                color: section === s.id ? NAVY : TEXT_DIM,
+              }}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {section === "general" && (
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+              <User size={12} className="inline mr-1" /> Nom de l'utilisateur
+            </label>
+            <input
+              type="text"
+              value={userName}
+              onChange={(e) => setUserName(e.target.value)}
+              className="w-full px-3 py-2 border rounded text-sm"
+              style={{ borderColor: BORDER }}
+            />
+            <div className="text-xs p-3 rounded mt-3" style={{ background: LIGHT, color: TEXT_DIM, lineHeight: 1.5 }}>
+              💾 Les données sont sauvegardées dans ton navigateur. Pour partager les données, utiliser l'export CSV.
+            </div>
+          </div>
+        )}
+
+        {section === "grid" && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+                  Heure de début
+                </label>
+                <select
+                  value={settings.startHour}
+                  onChange={(e) => setSettings({ ...settings, startHour: parseInt(e.target.value) })}
+                  className="w-full px-3 py-2 border rounded text-sm"
+                  style={{ borderColor: BORDER }}
+                >
+                  {Array.from({ length: 24 }, (_, i) => (
+                    <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+                  Heure de fin
+                </label>
+                <select
+                  value={settings.endHour}
+                  onChange={(e) => setSettings({ ...settings, endHour: parseInt(e.target.value) })}
+                  className="w-full px-3 py-2 border rounded text-sm"
+                  style={{ borderColor: BORDER }}
+                >
+                  {Array.from({ length: 24 }, (_, i) => i + 1).map(i => (
+                    <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+                Granularité
+              </label>
+              <select
+                value={settings.slotMinutes}
+                onChange={(e) => setSettings({ ...settings, slotMinutes: parseInt(e.target.value) })}
+                className="w-full px-3 py-2 border rounded text-sm"
+                style={{ borderColor: BORDER }}
+              >
+                <option value={15}>15 min (précis)</option>
+                <option value={30}>30 min (recommandé)</option>
+                <option value={60}>1 heure (rapide)</option>
+              </select>
+            </div>
+            <div className="text-xs p-3 rounded" style={{ background: LIGHT, color: TEXT_DIM }}>
+              ⚠️ Modifier la granularité ne réinterprète pas les saisies déjà faites.
+            </div>
+          </div>
+        )}
+
+        {section === "admin" && isAdminActive && (
+          <AdminSettings
+            adminPassword={adminPassword}
+            setAdminPassword={setAdminPassword}
+            syncUrl={syncUrl}
+            setSyncUrl={setSyncUrl}
+            unlockedDates={unlockedDates}
+            setUnlockedDates={setUnlockedDates}
           />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-              Heure de début
-            </label>
-            <select
-              value={settings.startHour}
-              onChange={(e) => setSettings({ ...settings, startHour: parseInt(e.target.value) })}
-              className="w-full px-3 py-2 border rounded text-sm"
-              style={{ borderColor: BORDER }}
-            >
-              {Array.from({ length: 24 }, (_, i) => (
-                <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-              Heure de fin
-            </label>
-            <select
-              value={settings.endHour}
-              onChange={(e) => setSettings({ ...settings, endHour: parseInt(e.target.value) })}
-              className="w-full px-3 py-2 border rounded text-sm"
-              style={{ borderColor: BORDER }}
-            >
-              {Array.from({ length: 24 }, (_, i) => i + 1).map(i => (
-                <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-            Granularité
-          </label>
-          <select
-            value={settings.slotMinutes}
-            onChange={(e) => setSettings({ ...settings, slotMinutes: parseInt(e.target.value) })}
-            className="w-full px-3 py-2 border rounded text-sm"
-            style={{ borderColor: BORDER }}
-          >
-            <option value={15}>15 min (précis)</option>
-            <option value={30}>30 min (recommandé)</option>
-            <option value={60}>1 heure (rapide)</option>
-          </select>
-        </div>
-
-        <div className="text-xs p-3 rounded" style={{ background: LIGHT, color: TEXT_DIM, lineHeight: 1.5 }}>
-          ⚠️ Modifier la granularité ne réinterprète pas les saisies déjà faites.<br />
-          💾 Les données sont sauvegardées dans ton navigateur. Pour partager les données, utiliser l'export CSV.
-        </div>
+        )}
 
         <button
           type="button"
@@ -1076,6 +1343,193 @@ function SettingsModal({ settings, setSettings, userName, setUserName, onClose }
         </button>
       </div>
     </Modal>
+  );
+}
+
+function AdminSettings({ adminPassword, setAdminPassword, syncUrl, setSyncUrl, unlockedDates, setUnlockedDates }) {
+  const [pwd, setPwd] = useState(adminPassword);
+  const [showPwd, setShowPwd] = useState(false);
+  const [pwdSaved, setPwdSaved] = useState(false);
+
+  const savePassword = () => {
+    if (pwd.length < 4) return;
+    setAdminPassword(pwd);
+    setPwdSaved(true);
+    setTimeout(() => setPwdSaved(false), 2000);
+  };
+
+  const removeUnlocked = (date) => {
+    setUnlockedDates(prev => prev.filter(d => d !== date));
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="text-xs p-3 rounded border-l-4" style={{ background: `${ORANGE}10`, borderColor: ORANGE, color: NAVY, lineHeight: 1.5 }}>
+        <strong>⚡ Mode admin</strong> — accès aux paramètres sensibles. Session active 30 min.
+      </div>
+
+      {/* Mot de passe admin */}
+      <div>
+        <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+          <KeyRound size={12} className="inline mr-1" /> Mot de passe admin
+        </label>
+        <div className="flex gap-2">
+          <input
+            type={showPwd ? "text" : "password"}
+            value={pwd}
+            onChange={(e) => setPwd(e.target.value)}
+            className="flex-1 px-3 py-2 border rounded text-sm"
+            style={{ borderColor: BORDER }}
+          />
+          <button
+            type="button"
+            onClick={() => setShowPwd(!showPwd)}
+            className="px-3 py-2 rounded text-xs border"
+            style={{ borderColor: BORDER, color: NAVY }}
+          >
+            {showPwd ? "Masquer" : "Voir"}
+          </button>
+          <button
+            type="button"
+            onClick={savePassword}
+            disabled={pwd.length < 4 || pwd === adminPassword}
+            className="px-3 py-2 rounded text-xs font-semibold text-white disabled:opacity-50"
+            style={{ background: pwdSaved ? "#0E9F6E" : NAVY }}
+          >
+            {pwdSaved ? "✓ Enregistré" : "Enregistrer"}
+          </button>
+        </div>
+        <p className="text-xs mt-1" style={{ color: TEXT_DIM }}>Minimum 4 caractères. Pensez à le partager au successeur si besoin.</p>
+      </div>
+
+      {/* Cloud sync */}
+      <div>
+        <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+          <Cloud size={12} className="inline mr-1" /> URL Google Sheets (sync cloud)
+        </label>
+        <input
+          type="url"
+          value={syncUrl}
+          onChange={(e) => setSyncUrl(e.target.value)}
+          placeholder="https://script.google.com/macros/s/.../exec"
+          className="w-full px-3 py-2 border rounded text-xs font-mono"
+          style={{ borderColor: BORDER }}
+        />
+        <p className="text-xs mt-1" style={{ color: TEXT_DIM }}>
+          Sauvegarde automatique 2 sec après chaque modification. Laisser vide pour désactiver.
+        </p>
+      </div>
+
+      {/* Dates déverrouillées */}
+      {unlockedDates.length > 0 && (
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide block mb-2" style={{ color: NAVY }}>
+            <Unlock size={12} className="inline mr-1" /> Dates déverrouillées en permanence
+          </label>
+          <div className="space-y-1 max-h-32 overflow-y-auto scroll-thin">
+            {unlockedDates.map(d => (
+              <div key={d} className="flex items-center justify-between px-3 py-1.5 rounded text-xs" style={{ background: LIGHT }}>
+                <span style={{ color: NAVY }}>{formatDateFR(d)}</span>
+                <button
+                  type="button"
+                  onClick={() => removeUnlocked(d)}
+                  className="text-xs hover:underline"
+                  style={{ color: ERROR }}
+                >
+                  Reverrouiller
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminLoginModal({ onTryLogin, onClose }) {
+  const [pwd, setPwd] = useState("");
+  const [error, setError] = useState(false);
+  const [shake, setShake] = useState(false);
+
+  const submit = () => {
+    if (!pwd) return;
+    const ok = onTryLogin(pwd);
+    if (!ok) {
+      setError(true);
+      setShake(true);
+      setTimeout(() => setShake(false), 500);
+      setPwd("");
+    }
+  };
+
+  return (
+    <Modal title="🔒 Accès administrateur" onClose={onClose}>
+      <div className={`space-y-4 ${shake ? "animate-pulse" : ""}`}>
+        <p className="text-sm" style={{ color: TEXT_DIM, lineHeight: 1.5 }}>
+          Entrer le mot de passe administrateur pour accéder aux paramètres avancés (cloud, déverrouillage, etc.)
+        </p>
+        <div>
+          <input
+            type="password"
+            value={pwd}
+            onChange={(e) => { setPwd(e.target.value); setError(false); }}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            autoFocus
+            placeholder="Mot de passe"
+            className="w-full px-3 py-2.5 border rounded text-sm"
+            style={{
+              borderColor: error ? ERROR : BORDER,
+              background: error ? `${ERROR}05` : "white",
+            }}
+          />
+          {error && (
+            <p className="text-xs mt-1" style={{ color: ERROR }}>
+              Mot de passe incorrect.
+            </p>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 px-3 py-2.5 rounded text-sm font-medium border"
+            style={{ borderColor: BORDER, color: NAVY }}
+          >
+            Annuler
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!pwd}
+            className="flex-1 px-3 py-2.5 rounded text-sm font-semibold text-white disabled:opacity-50"
+            style={{ background: NAVY }}
+          >
+            Se connecter
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function SyncIndicator({ status, lastSyncAt }) {
+  const cfg = {
+    idle:    { icon: Cloud,     color: BLUE,    bg: `${BLUE}15`,    label: "Cloud" },
+    syncing: { icon: RefreshCw, color: ORANGE,  bg: `${ORANGE}15`,  label: "Sync..." },
+    success: { icon: Check,     color: "#0E9F6E", bg: `#0E9F6E15`,  label: "OK" },
+    error:   { icon: AlertCircle, color: ERROR, bg: `${ERROR}15`,   label: "Erreur" },
+  }[status];
+  const Icon = cfg.icon;
+  return (
+    <div
+      className="px-2 py-1 rounded text-xs font-medium flex items-center gap-1"
+      style={{ background: cfg.bg, color: cfg.color }}
+      title={lastSyncAt ? `Dernière sync : ${lastSyncAt.toLocaleTimeString("fr-CH")}` : "Sync cloud"}
+    >
+      <Icon size={12} className={status === "syncing" ? "animate-spin" : ""} />
+      <span className="hidden sm:inline">{cfg.label}</span>
+    </div>
   );
 }
 
