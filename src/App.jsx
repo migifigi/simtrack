@@ -459,31 +459,36 @@ export default function App() {
             </div>
           </div>
 
-          {/* Date navigator (sticky inside header) */}
-          <div className="mt-3 flex items-center justify-between gap-2 pt-3 border-t" style={{ borderColor: BORDER }}>
+          {/* Date navigator - boutons fixes pour éviter chevauchements */}
+          <div className="mt-3 pt-3 border-t flex items-center gap-2" style={{ borderColor: BORDER }}>
             <button
+              type="button"
               onClick={() => setCurrentDate(shiftDate(currentDate, -1))}
-              className="p-2 rounded hover:bg-slate-100 active:bg-slate-200"
+              className="p-2 rounded hover:bg-slate-100 active:bg-slate-200 flex-shrink-0 relative z-10"
+              style={{ background: LIGHT }}
+              aria-label="Jour précédent"
             >
               <ChevronLeft size={20} style={{ color: NAVY }} />
             </button>
-            <div className="flex-1 text-center min-w-0">
+
+            <div className="flex-1 min-w-0 text-center">
               <div className="font-semibold capitalize text-sm lg:text-base truncate" style={{ color: NAVY }}>
                 <span className="lg:hidden">{formatDateShort(currentDate)}</span>
                 <span className="hidden lg:inline">{formatDateFR(currentDate)}</span>
               </div>
-              <div className="flex items-center justify-center gap-2 mt-1">
+              <div className="flex items-center justify-center gap-2 mt-1 flex-wrap">
                 <input
                   type="date"
                   value={currentDate}
                   onChange={(e) => setCurrentDate(e.target.value)}
-                  className="text-xs border rounded px-2 py-0.5"
+                  className="text-xs border rounded px-2 py-0.5 max-w-[140px]"
                   style={{ borderColor: BORDER, color: TEXT_DIM }}
                 />
                 {currentDate !== todayISO() && (
                   <button
+                    type="button"
                     onClick={() => setCurrentDate(todayISO())}
-                    className="text-xs px-2 py-0.5 rounded font-medium"
+                    className="text-xs px-2 py-0.5 rounded font-medium whitespace-nowrap"
                     style={{ background: `${BLUE}15`, color: BLUE }}
                   >
                     Aujourd'hui
@@ -491,9 +496,13 @@ export default function App() {
                 )}
               </div>
             </div>
+
             <button
+              type="button"
               onClick={() => setCurrentDate(shiftDate(currentDate, 1))}
-              className="p-2 rounded hover:bg-slate-100 active:bg-slate-200"
+              className="p-2 rounded hover:bg-slate-100 active:bg-slate-200 flex-shrink-0 relative z-10"
+              style={{ background: LIGHT }}
+              aria-label="Jour suivant"
             >
               <ChevronRight size={20} style={{ color: NAVY }} />
             </button>
