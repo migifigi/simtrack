@@ -1,4 +1,4 @@
-# Suivi d'activité — Simond SA
+# Suivi d'activité
 
 Application de saisie d'occupation horaire pour les agents d'exploitation.
 
