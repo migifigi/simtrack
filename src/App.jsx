@@ -1,11 +1,13 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import {
   Plus, Trash2, Download, ChevronLeft, ChevronRight,
-  Settings as SettingsIcon, Eraser, Edit3, Calendar,
-  BarChart3, X, Check, Clock, Tag as TagIcon, FileText,
-  Cloud, CloudOff, RefreshCw, AlertCircle, User, Menu
+  Settings as SettingsIcon, Eraser, Edit3,
+  BarChart3, X, Clock, Tag as TagIcon, FileText,
+  AlertCircle, User
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
+
+// =================== CONSTANTS ===================
 
 const NAVY = "#1B3A6B";
 const BLUE = "#2E5FAC";
@@ -13,7 +15,6 @@ const ORANGE = "#E07B39";
 const LIGHT = "#F5F7FA";
 const BORDER = "#E2E8F0";
 const TEXT_DIM = "#64748B";
-const SUCCESS = "#0E9F6E";
 const ERROR = "#DC2626";
 
 const DEFAULT_TAGS = [
@@ -36,22 +37,36 @@ const COLOR_PALETTE = [
   "#059669","#B45309","#BE123C","#1E40AF","#3F3F46"
 ];
 
-const todayISO = () => new Date().toISOString().split("T")[0];
-const shiftDate = (iso, delta) => {
-  const d = new Date(iso + "T00:00:00");
-  d.setDate(d.getDate() + delta);
-  return d.toISOString().split("T")[0];
+const STORAGE_KEY = "simond-suivi-v4";
+
+// =================== UTILS ===================
+
+const todayISO = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 };
+
+const shiftDate = (iso, delta) => {
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + delta);
+  const yy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+};
+
 const formatDateFR = (iso) => {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("fr-CH", {
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  return date.toLocaleDateString("fr-CH", {
     weekday: "long", day: "numeric", month: "long", year: "numeric"
   });
 };
-const formatDateShort = (iso) => {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("fr-CH", { weekday: "short", day: "numeric", month: "short" });
-};
+
 const generateSlots = (startHour, endHour, slotMinutes) => {
   const slots = [];
   let totalMin = startHour * 60;
@@ -64,6 +79,7 @@ const generateSlots = (startHour, endHour, slotMinutes) => {
   }
   return slots;
 };
+
 const minutesToHours = (min) => {
   const h = Math.floor(min / 60);
   const m = min % 60;
@@ -72,234 +88,147 @@ const minutesToHours = (min) => {
   return `${h}h${String(m).padStart(2, "0")}`;
 };
 
-export default function App() {
-  // Core state
-  const [tags, setTags] = useState(DEFAULT_TAGS);
-  const [activeTagId, setActiveTagId] = useState("t1");
-  const [currentDate, setCurrentDate] = useState(todayISO());
-  const [daysData, setDaysData] = useState({});
-  const [settings, setSettings] = useState({ startHour: 6, endHour: 19, slotMinutes: 30 });
-  const [userName, setUserName] = useState("");
-  const [syncUrl, setSyncUrl] = useState("");
-  const [syncStatus, setSyncStatus] = useState("idle");
-  const [lastSyncAt, setLastSyncAt] = useState(null);
+const loadState = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+};
 
-  // UI state
+const saveState = (state) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    // ignore
+  }
+};
+
+// =================== APP ===================
+
+export default function App() {
+  const initial = useMemo(() => loadState() || {}, []);
+
+  const [tags, setTags] = useState(initial.tags || DEFAULT_TAGS);
+  const [activeTagId, setActiveTagId] = useState(initial.activeTagId || "t1");
+  const [currentDate, setCurrentDate] = useState(todayISO());
+  const [daysData, setDaysData] = useState(initial.daysData || {});
+  const [settings, setSettings] = useState(initial.settings || { startHour: 6, endHour: 19, slotMinutes: 30 });
+  const [userName, setUserName] = useState(initial.userName || "");
+
   const [editingTag, setEditingTag] = useState(null);
   const [showAddTag, setShowAddTag] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showFirstRun, setShowFirstRun] = useState(false);
-  const [confirmDialog, setConfirmDialog] = useState(null); // { title, message, onConfirm }
-  const [newTagName, setNewTagName] = useState("");
-  const [newTagColor, setNewTagColor] = useState(COLOR_PALETTE[0]);
+  const [showFirstRun, setShowFirstRun] = useState(!initial.userName);
+  const [confirmDialog, setConfirmDialog] = useState(null);
   const [eraseMode, setEraseMode] = useState(false);
   const [analyticsRange, setAnalyticsRange] = useState("day");
   const [activeTab, setActiveTab] = useState("saisie");
-  const [loaded, setLoaded] = useState(false);
-
-  const isDragging = useRef(false);
-  const lastTouchedSlot = useRef(null);
-  const syncTimeout = useRef(null);
 
   const slots = useMemo(
     () => generateSlots(settings.startHour, settings.endHour, settings.slotMinutes),
     [settings]
   );
-  const dayData = daysData[currentDate] || {};
-  const tagById = (id) => tags.find(t => t.id === id);
 
-  // -------- Load from local storage --------
+  const dayData = daysData[currentDate] || {};
+  const tagById = useCallback(
+    (id) => tags.find(t => t.id === id),
+    [tags]
+  );
+
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [tagsRes, settingsRes, daysRes, prefsRes] = await Promise.all([
-          Promise.resolve({ value: localStorage.getItem("tags") }),
-          Promise.resolve({ value: localStorage.getItem("settings") }),
-          Promise.resolve({ value: localStorage.getItem("daysData") }),
-          Promise.resolve({ value: localStorage.getItem("prefs") }),
-        ]);
-        if (tagsRes?.value) setTags(JSON.parse(tagsRes.value));
-        if (settingsRes?.value) setSettings(JSON.parse(settingsRes.value));
-        if (daysRes?.value) setDaysData(JSON.parse(daysRes.value));
-        if (prefsRes?.value) {
-          const prefs = JSON.parse(prefsRes.value);
-          if (prefs.userName) setUserName(prefs.userName);
-          if (prefs.syncUrl) setSyncUrl(prefs.syncUrl);
-          if (!prefs.userName) setShowFirstRun(true);
-        } else {
-          setShowFirstRun(true);
-        }
-      } catch (e) {}
-      setLoaded(true);
-    };
-    load();
+    const timer = setTimeout(() => {
+      saveState({ tags, activeTagId, daysData, settings, userName });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [tags, activeTagId, daysData, settings, userName]);
+
+  const goToPreviousDay = useCallback(() => {
+    setCurrentDate(prev => shiftDate(prev, -1));
   }, []);
 
-  // -------- Save to local storage --------
-  useEffect(() => { if (loaded) localStorage.setItem("tags", JSON.stringify(tags)); }, [tags, loaded]);
-  useEffect(() => { if (loaded) localStorage.setItem("settings", JSON.stringify(settings)); }, [settings, loaded]);
-  useEffect(() => { if (loaded) localStorage.setItem("daysData", JSON.stringify(daysData)); }, [daysData, loaded]);
-  useEffect(() => {
-    if (loaded) {
-      localStorage.setItem("prefs", JSON.stringify({ userName, syncUrl }));
-    }
-  }, [userName, syncUrl, loaded]);
+  const goToNextDay = useCallback(() => {
+    setCurrentDate(prev => shiftDate(prev, 1));
+  }, []);
 
-  // -------- Cloud sync --------
-  const syncToCloud = async (date) => {
-    if (!syncUrl || !userName) return;
-    setSyncStatus("syncing");
-    try {
-      const dayPayload = daysData[date] || {};
-      const entries = Object.entries(dayPayload).map(([idx, tagId]) => {
-        const i = parseInt(idx);
-        const tag = tagById(tagId);
-        const start = slots[i];
-        const endMin = settings.startHour * 60 + (i + 1) * settings.slotMinutes;
-        const eh = Math.floor(endMin / 60);
-        const em = endMin % 60;
-        const end = `${String(eh).padStart(2,"0")}:${String(em).padStart(2,"0")}`;
-        return {
-          idx: i, start, end,
-          duration: settings.slotMinutes,
-          tagName: tag?.name || "(inconnu)",
-          tagColor: tag?.color || "#000000",
-        };
-      });
-      const res = await fetch(syncUrl, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ action: "save", user: userName, date, entries }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setSyncStatus("success");
-        setLastSyncAt(new Date());
-      } else {
-        setSyncStatus("error");
-      }
-    } catch (e) {
-      setSyncStatus("error");
-    }
-  };
+  const goToToday = useCallback(() => {
+    setCurrentDate(todayISO());
+  }, []);
 
-  // Auto-sync (debounced)
-  useEffect(() => {
-    if (!loaded || !syncUrl || !userName) return;
-    if (syncTimeout.current) clearTimeout(syncTimeout.current);
-    syncTimeout.current = setTimeout(() => syncToCloud(currentDate), 1500);
-    return () => clearTimeout(syncTimeout.current);
-  }, [daysData, syncUrl, userName, loaded]);
+  const isDragging = useRef(false);
+  const lastTouchedSlot = useRef(null);
 
-  const loadFromCloud = async () => {
-    if (!syncUrl || !userName) {
-      alert("Configurer d'abord le nom et l'URL Google Sheets dans les paramètres.");
-      return;
-    }
-    setSyncStatus("syncing");
-    try {
-      const res = await fetch(syncUrl, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ action: "load", user: userName }),
-      });
-      const data = await res.json();
-      if (data.ok && data.data) {
-        // Reconstruct daysData from sheet rows
-        // Sheet columns: User, Date, Idx, Start, End, Duration, TagName, TagColor, Saved
-        const rebuilt = {};
-        data.data.forEach(row => {
-          const [user, date, idx, start, end, duration, tagName] = row;
-          if (!rebuilt[date]) rebuilt[date] = {};
-          // Find or create tag by name
-          let tag = tags.find(t => t.name === tagName);
-          if (!tag) {
-            // Use existing tag IDs as best effort - here we just store name as fallback
-            // For simplicity: skip if tag not found locally
-            return;
-          }
-          rebuilt[date][idx] = tag.id;
-        });
-        setDaysData(prev => ({ ...prev, ...rebuilt }));
-        setSyncStatus("success");
-        setLastSyncAt(new Date());
-        alert(`✅ ${Object.keys(rebuilt).length} jour(s) restauré(s) depuis Google Sheets.`);
-      } else {
-        setSyncStatus("error");
-        alert("Erreur lors du chargement.");
-      }
-    } catch (e) {
-      setSyncStatus("error");
-      alert("Erreur de connexion : " + e.message);
-    }
-  };
-
-  // -------- Slot interactions --------
-  const setSlot = (slotIdx, tagId) => {
+  const setSlot = useCallback((slotIdx, tagId) => {
     setDaysData(prev => {
       const day = { ...(prev[currentDate] || {}) };
-      if (tagId === null) delete day[slotIdx];
-      else day[slotIdx] = tagId;
+      if (tagId === null) {
+        delete day[slotIdx];
+      } else {
+        day[slotIdx] = tagId;
+      }
       return { ...prev, [currentDate]: day };
     });
-  };
+  }, [currentDate]);
 
-  const handleSlotInteraction = (slotIdx) => {
-    if (eraseMode) setSlot(slotIdx, null);
-    else setSlot(slotIdx, activeTagId);
-  };
+  const handleSlotPaint = useCallback((slotIdx) => {
+    if (eraseMode) {
+      setSlot(slotIdx, null);
+    } else {
+      setSlot(slotIdx, activeTagId);
+    }
+  }, [eraseMode, setSlot, activeTagId]);
 
-  const eraseSlot = (slotIdx) => {
+  const eraseSlot = useCallback((slotIdx) => {
     setSlot(slotIdx, null);
-  };
+  }, [setSlot]);
 
-  const handleMouseDown = (slotIdx) => {
+  const handleSlotMouseDown = useCallback((slotIdx) => {
     isDragging.current = true;
     lastTouchedSlot.current = slotIdx;
-    handleSlotInteraction(slotIdx);
-  };
-  const handleMouseEnter = (slotIdx) => {
+    handleSlotPaint(slotIdx);
+  }, [handleSlotPaint]);
+
+  const handleSlotMouseEnter = useCallback((slotIdx) => {
     if (isDragging.current && lastTouchedSlot.current !== slotIdx) {
       lastTouchedSlot.current = slotIdx;
-      handleSlotInteraction(slotIdx);
+      handleSlotPaint(slotIdx);
     }
-  };
-  const handleMouseUp = () => {
-    isDragging.current = false;
-    lastTouchedSlot.current = null;
-  };
+  }, [handleSlotPaint]);
 
   useEffect(() => {
-    document.addEventListener("mouseup", handleMouseUp);
-    document.addEventListener("touchend", handleMouseUp);
+    const stopDrag = () => {
+      isDragging.current = false;
+      lastTouchedSlot.current = null;
+    };
+    document.addEventListener("mouseup", stopDrag);
+    document.addEventListener("touchend", stopDrag);
+    document.addEventListener("touchcancel", stopDrag);
     return () => {
-      document.removeEventListener("mouseup", handleMouseUp);
-      document.removeEventListener("touchend", handleMouseUp);
+      document.removeEventListener("mouseup", stopDrag);
+      document.removeEventListener("touchend", stopDrag);
+      document.removeEventListener("touchcancel", stopDrag);
     };
   }, []);
 
-  // -------- Tag management --------
-  const addTag = () => {
-    if (!newTagName.trim()) return;
-    const newTag = { id: `t${Date.now()}`, name: newTagName.trim(), color: newTagColor };
-    setTags([...tags, newTag]);
-    setNewTagName("");
-    setNewTagColor(COLOR_PALETTE[0]);
-    setShowAddTag(false);
-  };
+  const addTag = useCallback((name, color) => {
+    const newTag = { id: `t${Date.now()}`, name: name.trim(), color };
+    setTags(prev => [...prev, newTag]);
+  }, []);
 
-  const updateTag = (id, updates) => {
-    setTags(tags.map(t => t.id === id ? { ...t, ...updates } : t));
-  };
+  const updateTag = useCallback((id, updates) => {
+    setTags(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+  }, []);
 
-  const deleteTag = (id) => {
+  const deleteTag = useCallback((id) => {
     setConfirmDialog({
       title: "Supprimer la catégorie ?",
       message: "Les créneaux déjà assignés à cette catégorie seront effacés.",
       confirmLabel: "Supprimer",
       danger: true,
       onConfirm: () => {
-        setTags(tags.filter(t => t.id !== id));
+        setTags(prev => prev.filter(t => t.id !== id));
         setDaysData(prev => {
           const next = {};
           for (const [date, day] of Object.entries(prev)) {
@@ -311,14 +240,18 @@ export default function App() {
           }
           return next;
         });
-        if (activeTagId === id && tags.length > 1) {
-          setActiveTagId(tags.find(t => t.id !== id)?.id);
-        }
+        setActiveTagId(prevActive => {
+          if (prevActive === id) {
+            const remaining = tags.filter(t => t.id !== id);
+            return remaining[0]?.id || "";
+          }
+          return prevActive;
+        });
       }
     });
-  };
+  }, [tags]);
 
-  const clearDay = () => {
+  const clearDay = useCallback(() => {
     setConfirmDialog({
       title: "Effacer toutes les saisies du jour ?",
       message: `Cela supprimera toutes les entrées du ${formatDateFR(currentDate)}.`,
@@ -332,23 +265,29 @@ export default function App() {
         });
       }
     });
-  };
+  }, [currentDate]);
 
-  // -------- Analytics --------
-  const getAnalyticsData = () => {
+  const analytics = useMemo(() => {
     let dates = [];
-    if (analyticsRange === "day") dates = [currentDate];
-    else if (analyticsRange === "week") {
-      const d = new Date(currentDate + "T00:00:00");
-      const dow = d.getDay() || 7;
-      const monday = new Date(d);
-      monday.setDate(d.getDate() - (dow - 1));
+    if (analyticsRange === "day") {
+      dates = [currentDate];
+    } else if (analyticsRange === "week") {
+      const [y, m, d] = currentDate.split("-").map(Number);
+      const date = new Date(y, m - 1, d);
+      const dow = date.getDay() || 7;
+      const monday = new Date(date);
+      monday.setDate(date.getDate() - (dow - 1));
       for (let i = 0; i < 7; i++) {
         const dd = new Date(monday);
         dd.setDate(monday.getDate() + i);
-        dates.push(dd.toISOString().split("T")[0]);
+        const yy = dd.getFullYear();
+        const mm = String(dd.getMonth() + 1).padStart(2, "0");
+        const ddd = String(dd.getDate()).padStart(2, "0");
+        dates.push(`${yy}-${mm}-${ddd}`);
       }
-    } else if (analyticsRange === "all") dates = Object.keys(daysData);
+    } else {
+      dates = Object.keys(daysData);
+    }
 
     const totals = {};
     let totalMin = 0;
@@ -367,13 +306,14 @@ export default function App() {
       pct: totalMin ? ((totals[tag.id] || 0) / totalMin) * 100 : 0,
     })).filter(d => d.value > 0).sort((a, b) => b.value - a.value);
 
-    return { data, totalMin, daysCount: dates.filter(d => daysData[d] && Object.keys(daysData[d]).length > 0).length };
-  };
+    return {
+      data,
+      totalMin,
+      daysCount: dates.filter(d => daysData[d] && Object.keys(daysData[d]).length > 0).length
+    };
+  }, [analyticsRange, currentDate, daysData, settings.slotMinutes, tags]);
 
-  const analytics = getAnalyticsData();
-
-  // -------- CSV Export --------
-  const exportCSV = () => {
+  const exportCSV = useCallback(() => {
     const header = "Utilisateur;Date;Heure début;Heure fin;Durée (min);Catégorie\n";
     const rows = [];
     Object.entries(daysData)
@@ -396,14 +336,13 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `suivi_activite_${userName.replace(/\s+/g,"_") || "user"}_${todayISO()}.csv`;
+    a.download = `suivi_activite_${(userName || "user").replace(/\s+/g,"_")}_${todayISO()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  };
+  }, [daysData, slots, settings, tagById, userName]);
 
   const dayMinutes = Object.keys(dayData).length * settings.slotMinutes;
 
-  // ========== RENDER ==========
   return (
     <div className="min-h-screen pb-20 lg:pb-6" style={{ background: LIGHT, fontFamily: "'Manrope', system-ui, sans-serif" }}>
       <style>{`
@@ -411,10 +350,8 @@ export default function App() {
         body { margin: 0; -webkit-tap-highlight-color: transparent; }
         .scroll-thin::-webkit-scrollbar { width: 6px; height: 6px; }
         .scroll-thin::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
-        button, [role="button"] { touch-action: manipulation; }
       `}</style>
 
-      {/* HEADER */}
       <header className="sticky top-0 z-30 border-b" style={{ background: "white", borderColor: BORDER }}>
         <div className="max-w-7xl mx-auto px-4 lg:px-6 py-3 lg:py-4">
           <div className="flex items-center justify-between gap-3">
@@ -439,80 +376,38 @@ export default function App() {
               </div>
             </div>
             <div className="flex items-center gap-1.5 flex-shrink-0">
-              <SyncIndicator status={syncStatus} hasUrl={!!syncUrl} lastSyncAt={lastSyncAt} />
               <button
+                type="button"
                 onClick={() => setShowSettings(true)}
                 className="p-2 rounded border transition"
                 style={{ borderColor: BORDER, color: NAVY, background: "white" }}
-                title="Paramètres"
+                aria-label="Paramètres"
               >
-                <SettingsIcon size={16} />
+                <SettingsIcon size={16} style={{ pointerEvents: "none" }} />
               </button>
               <button
+                type="button"
                 onClick={exportCSV}
                 className="px-3 py-2 rounded text-xs lg:text-sm font-semibold flex items-center gap-1.5 text-white transition"
                 style={{ background: ORANGE }}
               >
-                <Download size={14} />
-                <span className="hidden sm:inline">CSV</span>
+                <Download size={14} style={{ pointerEvents: "none" }} />
+                <span className="hidden sm:inline pointer-events-none">CSV</span>
               </button>
             </div>
           </div>
 
-          {/* Date navigator - boutons fixes pour éviter chevauchements */}
-          <div className="mt-3 pt-3 border-t flex items-center gap-2" style={{ borderColor: BORDER }}>
-            <button
-              type="button"
-              onClick={() => setCurrentDate(shiftDate(currentDate, -1))}
-              className="p-2 rounded hover:bg-slate-100 active:bg-slate-200 flex-shrink-0 relative z-10"
-              style={{ background: LIGHT }}
-              aria-label="Jour précédent"
-            >
-              <ChevronLeft size={20} style={{ color: NAVY, pointerEvents: "none" }} />
-            </button>
-
-            <div className="flex-1 min-w-0 text-center">
-              <div className="font-semibold capitalize text-sm lg:text-base truncate" style={{ color: NAVY }}>
-                <span className="lg:hidden">{formatDateShort(currentDate)}</span>
-                <span className="hidden lg:inline">{formatDateFR(currentDate)}</span>
-              </div>
-              <div className="flex items-center justify-center gap-2 mt-1 flex-wrap">
-                <input
-                  type="date"
-                  value={currentDate}
-                  onChange={(e) => setCurrentDate(e.target.value)}
-                  className="text-xs border rounded px-2 py-0.5 max-w-[140px]"
-                  style={{ borderColor: BORDER, color: TEXT_DIM }}
-                />
-                {currentDate !== todayISO() && (
-                  <button
-                    type="button"
-                    onClick={() => setCurrentDate(todayISO())}
-                    className="text-xs px-2 py-0.5 rounded font-medium whitespace-nowrap"
-                    style={{ background: `${BLUE}15`, color: BLUE }}
-                  >
-                    Aujourd'hui
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setCurrentDate(shiftDate(currentDate, 1))}
-              className="p-2 rounded hover:bg-slate-100 active:bg-slate-200 flex-shrink-0 relative z-10"
-              style={{ background: LIGHT }}
-              aria-label="Jour suivant"
-            >
-              <ChevronRight size={20} style={{ color: NAVY, pointerEvents: "none" }} />
-            </button>
-          </div>
+          <DateNavigator
+            currentDate={currentDate}
+            onPrev={goToPreviousDay}
+            onNext={goToNextDay}
+            onToday={goToToday}
+            onPickDate={setCurrentDate}
+          />
         </div>
       </header>
 
-      {/* MAIN */}
       <div className="max-w-7xl mx-auto p-3 lg:p-6 lg:grid lg:grid-cols-12 lg:gap-6">
-        {/* TAGS PANEL */}
         <aside className={`lg:col-span-3 mb-3 lg:mb-0 ${activeTab === "tags" ? "block" : "hidden lg:block"}`}>
           <TagsPanel
             tags={tags}
@@ -529,15 +424,14 @@ export default function App() {
           />
         </aside>
 
-        {/* GRID */}
         <main className={`lg:col-span-6 ${activeTab === "saisie" ? "block" : "hidden lg:block"}`}>
           <TimeGridPanel
             slots={slots}
             settings={settings}
             dayData={dayData}
             tagById={tagById}
-            handleMouseDown={handleMouseDown}
-            handleMouseEnter={handleMouseEnter}
+            handleSlotMouseDown={handleSlotMouseDown}
+            handleSlotMouseEnter={handleSlotMouseEnter}
             eraseMode={eraseMode}
             dayMinutes={dayMinutes}
             clearDay={clearDay}
@@ -545,7 +439,6 @@ export default function App() {
           />
         </main>
 
-        {/* ANALYTICS */}
         <aside className={`lg:col-span-3 mt-3 lg:mt-0 ${activeTab === "analyse" ? "block" : "hidden lg:block"}`}>
           <AnalyticsPanel
             analytics={analytics}
@@ -555,7 +448,6 @@ export default function App() {
         </aside>
       </div>
 
-      {/* MOBILE TAB BAR */}
       <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-30 border-t" style={{ background: "white", borderColor: BORDER }}>
         <div className="grid grid-cols-3">
           {[
@@ -568,6 +460,7 @@ export default function App() {
             return (
               <button
                 key={t.id}
+                type="button"
                 onClick={() => setActiveTab(t.id)}
                 className="flex flex-col items-center justify-center py-2.5 transition"
                 style={{
@@ -575,52 +468,41 @@ export default function App() {
                   background: active ? `${BLUE}10` : "transparent",
                 }}
               >
-                <Icon size={20} />
-                <span className="text-xs mt-0.5 font-medium">{t.label}</span>
+                <Icon size={20} style={{ pointerEvents: "none" }} />
+                <span className="text-xs mt-0.5 font-medium pointer-events-none">{t.label}</span>
               </button>
             );
           })}
         </div>
       </nav>
 
-      {/* MODALS */}
       {showFirstRun && (
-        <Modal title="👋 Bienvenue" onClose={() => {}} hideClose>
-          <FirstRunSetup
-            userName={userName}
-            setUserName={setUserName}
-            onDone={() => setShowFirstRun(false)}
-          />
-        </Modal>
+        <FirstRunModal
+          onDone={(name) => {
+            setUserName(name);
+            setShowFirstRun(false);
+          }}
+        />
       )}
 
       {showAddTag && (
-        <Modal onClose={() => setShowAddTag(false)} title="Nouvelle catégorie">
-          <AddTagForm
-            newTagName={newTagName}
-            setNewTagName={setNewTagName}
-            newTagColor={newTagColor}
-            setNewTagColor={setNewTagColor}
-            onCancel={() => setShowAddTag(false)}
-            onAdd={addTag}
-          />
-        </Modal>
+        <AddTagModal
+          onClose={() => setShowAddTag(false)}
+          onAdd={(name, color) => {
+            addTag(name, color);
+            setShowAddTag(false);
+          }}
+        />
       )}
 
       {showSettings && (
-        <Modal onClose={() => setShowSettings(false)} title="Paramètres" wide>
-          <SettingsForm
-            settings={settings}
-            setSettings={setSettings}
-            userName={userName}
-            setUserName={setUserName}
-            syncUrl={syncUrl}
-            setSyncUrl={setSyncUrl}
-            loadFromCloud={loadFromCloud}
-            syncStatus={syncStatus}
-            onClose={() => setShowSettings(false)}
-          />
-        </Modal>
+        <SettingsModal
+          settings={settings}
+          setSettings={setSettings}
+          userName={userName}
+          setUserName={setUserName}
+          onClose={() => setShowSettings(false)}
+        />
       )}
 
       {confirmDialog && (
@@ -633,39 +515,61 @@ export default function App() {
   );
 }
 
-// =================== SUB-COMPONENTS ===================
+// =================== DATE NAVIGATOR ===================
 
-function SyncIndicator({ status, hasUrl, lastSyncAt }) {
-  if (!hasUrl) {
-    return (
-      <div
-        className="px-2 py-1 rounded text-xs font-medium flex items-center gap-1 hidden sm:flex"
-        style={{ background: LIGHT, color: TEXT_DIM }}
-        title="Aucune synchronisation cloud configurée"
-      >
-        <CloudOff size={12} />
-        Local
-      </div>
-    );
-  }
-  const cfg = {
-    idle:    { icon: Cloud,     color: BLUE,    bg: `${BLUE}15`,    label: "Synchronisé" },
-    syncing: { icon: RefreshCw, color: ORANGE,  bg: `${ORANGE}15`,  label: "Sync..." },
-    success: { icon: Check,     color: SUCCESS, bg: `${SUCCESS}15`, label: "Sync OK" },
-    error:   { icon: AlertCircle, color: ERROR, bg: `${ERROR}15`,   label: "Erreur" },
-  }[status];
-  const Icon = cfg.icon;
+function DateNavigator({ currentDate, onPrev, onNext, onToday, onPickDate }) {
+  const isToday = currentDate === todayISO();
   return (
-    <div
-      className="px-2 py-1 rounded text-xs font-medium flex items-center gap-1"
-      style={{ background: cfg.bg, color: cfg.color }}
-      title={lastSyncAt ? `Dernière sync : ${lastSyncAt.toLocaleTimeString("fr-CH")}` : ""}
-    >
-      <Icon size={12} className={status === "syncing" ? "animate-spin" : ""} />
-      <span className="hidden sm:inline">{cfg.label}</span>
+    <div className="mt-3 pt-3 border-t flex items-center gap-2" style={{ borderColor: BORDER }}>
+      <button
+        type="button"
+        onClick={onPrev}
+        className="p-2 rounded hover:bg-slate-100 active:bg-slate-200 flex-shrink-0"
+        style={{ background: LIGHT }}
+        aria-label="Jour précédent"
+      >
+        <ChevronLeft size={20} style={{ color: NAVY, pointerEvents: "none" }} />
+      </button>
+
+      <div className="flex-1 min-w-0 text-center">
+        <div className="font-semibold capitalize text-sm lg:text-base truncate" style={{ color: NAVY }}>
+          {formatDateFR(currentDate)}
+        </div>
+        <div className="flex items-center justify-center gap-2 mt-1 flex-wrap">
+          <input
+            type="date"
+            value={currentDate}
+            onChange={(e) => onPickDate(e.target.value)}
+            className="text-xs border rounded px-2 py-0.5 max-w-[140px]"
+            style={{ borderColor: BORDER, color: TEXT_DIM }}
+          />
+          {!isToday && (
+            <button
+              type="button"
+              onClick={onToday}
+              className="text-xs px-2 py-0.5 rounded font-medium whitespace-nowrap"
+              style={{ background: `${BLUE}15`, color: BLUE }}
+            >
+              Aujourd'hui
+            </button>
+          )}
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={onNext}
+        className="p-2 rounded hover:bg-slate-100 active:bg-slate-200 flex-shrink-0"
+        style={{ background: LIGHT }}
+        aria-label="Jour suivant"
+      >
+        <ChevronRight size={20} style={{ color: NAVY, pointerEvents: "none" }} />
+      </button>
     </div>
   );
 }
+
+// =================== TAGS PANEL ===================
 
 function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode, editingTag, setEditingTag, updateTag, deleteTag, setShowAddTag, tagById }) {
   return (
@@ -675,11 +579,13 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
           <TagIcon size={14} /> Catégories
         </h2>
         <button
+          type="button"
           onClick={() => setShowAddTag(true)}
           className="w-8 h-8 rounded flex items-center justify-center text-white"
           style={{ background: NAVY }}
+          aria-label="Ajouter une catégorie"
         >
-          <Plus size={16} />
+          <Plus size={16} style={{ pointerEvents: "none" }} />
         </button>
       </div>
       <p className="text-xs mb-3" style={{ color: TEXT_DIM }}>
@@ -690,7 +596,7 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
         {tags.map(tag => (
           <div
             key={tag.id}
-            className={`group flex items-center gap-2 p-2 rounded cursor-pointer transition border-2`}
+            className="group flex items-center gap-2 p-2 rounded cursor-pointer transition border-2"
             style={{
               background: activeTagId === tag.id && !eraseMode ? `${tag.color}15` : "transparent",
               borderColor: activeTagId === tag.id && !eraseMode ? tag.color : "transparent",
@@ -715,16 +621,20 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
             )}
             <div className="flex gap-0.5">
               <button
+                type="button"
                 onClick={(e) => { e.stopPropagation(); setEditingTag(tag.id); }}
                 className="p-1.5 hover:bg-slate-100 rounded"
+                aria-label="Renommer"
               >
-                <Edit3 size={13} style={{ color: TEXT_DIM }} />
+                <Edit3 size={13} style={{ color: TEXT_DIM, pointerEvents: "none" }} />
               </button>
               <button
+                type="button"
                 onClick={(e) => { e.stopPropagation(); deleteTag(tag.id); }}
                 className="p-1.5 hover:bg-red-50 rounded"
+                aria-label="Supprimer"
               >
-                <Trash2 size={13} style={{ color: ERROR }} />
+                <Trash2 size={13} style={{ color: ERROR, pointerEvents: "none" }} />
               </button>
             </div>
           </div>
@@ -737,6 +647,7 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
           <div className="flex flex-wrap gap-1">
             {COLOR_PALETTE.map(c => (
               <button
+                type="button"
                 key={c}
                 onClick={() => updateTag(activeTagId, { color: c })}
                 className="w-6 h-6 rounded border-2 transition"
@@ -744,6 +655,7 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
                   background: c,
                   borderColor: tagById(activeTagId).color === c ? NAVY : "transparent",
                 }}
+                aria-label={`Couleur ${c}`}
               />
             ))}
           </div>
@@ -751,6 +663,7 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
       )}
 
       <button
+        type="button"
         onClick={() => setEraseMode(!eraseMode)}
         className="mt-3 w-full px-3 py-2.5 rounded text-sm font-medium flex items-center justify-center gap-2 border transition"
         style={{
@@ -759,34 +672,39 @@ function TagsPanel({ tags, activeTagId, setActiveTagId, eraseMode, setEraseMode,
           color: eraseMode ? ERROR : NAVY,
         }}
       >
-        <Eraser size={14} />
-        {eraseMode ? "Mode gomme actif" : "Activer la gomme"}
+        <Eraser size={14} style={{ pointerEvents: "none" }} />
+        <span className="pointer-events-none">{eraseMode ? "Mode gomme actif" : "Activer la gomme"}</span>
       </button>
     </div>
   );
 }
 
-function TimeGridPanel({ slots, settings, dayData, tagById, handleMouseDown, handleMouseEnter, eraseMode, dayMinutes, clearDay, eraseSlot }) {
+// =================== TIME GRID ===================
+
+function TimeGridPanel({ slots, settings, dayData, tagById, handleSlotMouseDown, handleSlotMouseEnter, eraseMode, dayMinutes, clearDay, eraseSlot }) {
+  const totalDayMin = slots.length * settings.slotMinutes;
   return (
     <div className="rounded-lg border" style={{ background: "white", borderColor: BORDER }}>
       <div className="px-4 py-2 flex items-center justify-between text-xs border-b" style={{ background: LIGHT, borderColor: BORDER }}>
         <div className="flex items-center gap-2" style={{ color: TEXT_DIM }}>
           <Clock size={12} />
-          <span><strong style={{ color: NAVY }}>{minutesToHours(dayMinutes)}</strong> sur {minutesToHours(slots.length * settings.slotMinutes)}</span>
+          <span><strong style={{ color: NAVY }}>{minutesToHours(dayMinutes)}</strong> sur {minutesToHours(totalDayMin)}</span>
         </div>
         {Object.keys(dayData).length > 0 && (
           <button
+            type="button"
             onClick={clearDay}
             className="text-xs flex items-center gap-1 hover:underline font-medium"
             style={{ color: ERROR }}
           >
-            <Trash2 size={11} /> Effacer le jour
+            <Trash2 size={11} style={{ pointerEvents: "none" }} />
+            <span className="pointer-events-none">Effacer le jour</span>
           </button>
         )}
       </div>
 
       <div className="px-4 py-2 text-xs border-b" style={{ background: `${ORANGE}08`, borderColor: BORDER, color: TEXT_DIM }}>
-        💡 <strong style={{ color: NAVY }}>Astuce :</strong> survoler/toucher un créneau rempli puis cliquer le ❌ pour effacer rapidement
+        💡 <strong style={{ color: NAVY }}>Astuce :</strong> cliquer sur le ❌ d'un créneau pour l'effacer
       </div>
 
       <div className="p-3 lg:p-4 select-none">
@@ -797,8 +715,8 @@ function TimeGridPanel({ slots, settings, dayData, tagById, handleMouseDown, han
               idx={idx}
               slotLabel={slotLabel}
               tag={tagById(dayData[idx])}
-              handleMouseDown={handleMouseDown}
-              handleMouseEnter={handleMouseEnter}
+              handleSlotMouseDown={handleSlotMouseDown}
+              handleSlotMouseEnter={handleSlotMouseEnter}
               eraseMode={eraseMode}
               eraseSlot={eraseSlot}
             />
@@ -809,28 +727,8 @@ function TimeGridPanel({ slots, settings, dayData, tagById, handleMouseDown, han
   );
 }
 
-function SlotRow({ idx, slotLabel, tag, handleMouseDown, handleMouseEnter, eraseMode, eraseSlot }) {
+function SlotRow({ idx, slotLabel, tag, handleSlotMouseDown, handleSlotMouseEnter, eraseMode, eraseSlot }) {
   const isHourMark = slotLabel.endsWith(":00");
-  const longPressTimer = useRef(null);
-  const longPressTriggered = useRef(false);
-
-  const startLongPress = () => {
-    longPressTriggered.current = false;
-    longPressTimer.current = setTimeout(() => {
-      if (tag) {
-        longPressTriggered.current = true;
-        eraseSlot(idx);
-        if (navigator.vibrate) navigator.vibrate(50);
-      }
-    }, 500);
-  };
-
-  const cancelLongPress = () => {
-    if (longPressTimer.current) {
-      clearTimeout(longPressTimer.current);
-      longPressTimer.current = null;
-    }
-  };
 
   return (
     <div className="flex items-stretch gap-2">
@@ -843,80 +741,63 @@ function SlotRow({ idx, slotLabel, tag, handleMouseDown, handleMouseEnter, erase
       >
         {slotLabel}
       </div>
-      <div
-        onMouseDown={() => {
-          startLongPress();
-          handleMouseDown(idx);
-        }}
-        onMouseUp={cancelLongPress}
-        onMouseLeave={cancelLongPress}
-        onMouseEnter={() => handleMouseEnter(idx)}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          if (tag) eraseSlot(idx);
-        }}
-        onTouchStart={(e) => {
-          e.preventDefault();
-          startLongPress();
-          if (!longPressTriggered.current) handleMouseDown(idx);
-        }}
-        onTouchEnd={(e) => {
-          e.preventDefault();
-          cancelLongPress();
-        }}
-        onTouchMove={(e) => {
-          cancelLongPress();
-          e.preventDefault();
-          const touch = e.touches[0];
-          const el = document.elementFromPoint(touch.clientX, touch.clientY);
-          const slotAttr = el?.getAttribute?.("data-slot");
-          if (slotAttr !== null && slotAttr !== undefined) {
-            handleMouseEnter(parseInt(slotAttr));
-          }
-        }}
-        data-slot={idx}
-        className="flex-1 h-11 lg:h-9 rounded transition flex items-center px-3 text-sm border relative group"
-        style={{
-          background: tag ? tag.color : "white",
-          color: tag ? "white" : TEXT_DIM,
-          borderColor: tag ? tag.color : BORDER,
-          fontWeight: tag ? 500 : 400,
-          cursor: eraseMode ? "crosshair" : "pointer",
-        }}
-      >
-        {tag ? (
-          <>
+      <div className="flex-1 flex items-stretch gap-1">
+        <button
+          type="button"
+          onMouseDown={() => handleSlotMouseDown(idx)}
+          onMouseEnter={() => handleSlotMouseEnter(idx)}
+          onTouchStart={(e) => {
+            e.preventDefault();
+            handleSlotMouseDown(idx);
+          }}
+          onTouchMove={(e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            const el = document.elementFromPoint(touch.clientX, touch.clientY);
+            const slotAttr = el?.getAttribute?.("data-slot");
+            if (slotAttr !== null && slotAttr !== undefined) {
+              handleSlotMouseEnter(parseInt(slotAttr));
+            }
+          }}
+          data-slot={idx}
+          className="flex-1 h-11 lg:h-9 rounded transition flex items-center px-3 text-sm border text-left"
+          style={{
+            background: tag ? tag.color : "white",
+            color: tag ? "white" : TEXT_DIM,
+            borderColor: tag ? tag.color : BORDER,
+            fontWeight: tag ? 500 : 400,
+            cursor: eraseMode ? "crosshair" : "pointer",
+          }}
+        >
+          {tag ? (
             <span className="truncate flex-1 pointer-events-none">{tag.name}</span>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                eraseSlot(idx);
-              }}
-              onMouseDown={(e) => e.stopPropagation()}
-              onTouchStart={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                eraseSlot(idx);
-              }}
-              className="ml-2 w-7 h-7 lg:w-6 lg:h-6 rounded-full flex items-center justify-center transition opacity-70 hover:opacity-100 active:scale-90 flex-shrink-0"
-              style={{
-                background: "rgba(255,255,255,0.25)",
-              }}
-              title="Effacer ce créneau"
-              aria-label="Effacer ce créneau"
-            >
-              <X size={14} strokeWidth={2.5} />
-            </button>
-          </>
-        ) : (
-          <span className="text-xs italic opacity-60 pointer-events-none">
-            {eraseMode ? "Toucher pour effacer" : "Toucher pour assigner"}
-          </span>
+          ) : (
+            <span className="text-xs italic opacity-60 pointer-events-none">
+              {eraseMode ? "Toucher pour effacer" : "Toucher pour assigner"}
+            </span>
+          )}
+        </button>
+        {tag && (
+          <button
+            type="button"
+            onClick={() => eraseSlot(idx)}
+            className="w-11 lg:w-9 h-11 lg:h-9 rounded flex items-center justify-center transition active:scale-90 flex-shrink-0"
+            style={{
+              background: tag.color,
+              color: "white",
+              border: `1px solid ${tag.color}`,
+            }}
+            aria-label="Effacer ce créneau"
+          >
+            <X size={16} strokeWidth={2.5} style={{ pointerEvents: "none" }} />
+          </button>
         )}
       </div>
     </div>
   );
 }
+
+// =================== ANALYTICS ===================
 
 function AnalyticsPanel({ analytics, analyticsRange, setAnalyticsRange }) {
   return (
@@ -934,6 +815,7 @@ function AnalyticsPanel({ analytics, analyticsRange, setAnalyticsRange }) {
           ].map(opt => (
             <button
               key={opt.id}
+              type="button"
               onClick={() => setAnalyticsRange(opt.id)}
               className="flex-1 text-xs py-1.5 rounded font-medium transition"
               style={{
@@ -1009,239 +891,191 @@ function AnalyticsPanel({ analytics, analyticsRange, setAnalyticsRange }) {
   );
 }
 
-function FirstRunSetup({ userName, setUserName, onDone }) {
-  const [name, setName] = useState(userName || "");
-  return (
-    <div className="space-y-4">
-      <div>
-        <p className="text-sm" style={{ color: TEXT_DIM, lineHeight: 1.5 }}>
-          Pour commencer, indique ton prénom et nom. Cela permettra d'identifier tes saisies (utile si plusieurs collègues utilisent l'outil).
-        </p>
-      </div>
-      <div>
-        <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-          Ton nom
-        </label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          autoFocus
-          placeholder="Ex : Jean Dupont"
-          className="w-full px-3 py-2.5 border rounded text-sm"
-          style={{ borderColor: BORDER }}
-          onKeyDown={(e) => e.key === "Enter" && name.trim() && (setUserName(name.trim()), onDone())}
-        />
-      </div>
-      <button
-        disabled={!name.trim()}
-        onClick={() => { setUserName(name.trim()); onDone(); }}
-        className="w-full px-3 py-2.5 rounded text-sm font-semibold text-white disabled:opacity-50"
-        style={{ background: NAVY }}
-      >
-        Commencer
-      </button>
-      <p className="text-xs text-center" style={{ color: TEXT_DIM }}>
-        Tu pourras configurer la sauvegarde Google Sheets dans les paramètres ⚙️
-      </p>
-    </div>
-  );
-}
+// =================== MODALS ===================
 
-function AddTagForm({ newTagName, setNewTagName, newTagColor, setNewTagColor, onCancel, onAdd }) {
+function FirstRunModal({ onDone }) {
+  const [name, setName] = useState("");
   return (
-    <div className="space-y-4">
-      <div>
-        <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-          Nom
-        </label>
-        <input
-          type="text"
-          value={newTagName}
-          onChange={(e) => setNewTagName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && onAdd()}
-          autoFocus
-          placeholder="Ex : Saisie BL"
-          className="w-full px-3 py-2.5 border rounded text-sm"
-          style={{ borderColor: BORDER }}
-        />
-      </div>
-      <div>
-        <label className="text-xs font-semibold uppercase tracking-wide block mb-2" style={{ color: NAVY }}>
-          Couleur
-        </label>
-        <div className="flex flex-wrap gap-2">
-          {COLOR_PALETTE.map(c => (
-            <button
-              key={c}
-              onClick={() => setNewTagColor(c)}
-              className="w-8 h-8 rounded border-2 transition"
-              style={{
-                background: c,
-                borderColor: newTagColor === c ? NAVY : "transparent",
-              }}
-            />
-          ))}
+    <Modal title="👋 Bienvenue" hideClose>
+      <div className="space-y-4">
+        <p className="text-sm" style={{ color: TEXT_DIM, lineHeight: 1.5 }}>
+          Pour commencer, indique ton prénom et nom. Cela permettra d'identifier tes saisies dans les exports.
+        </p>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+            Ton nom
+          </label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+            placeholder="Ex : Jean Dupont"
+            className="w-full px-3 py-2.5 border rounded text-sm"
+            style={{ borderColor: BORDER }}
+            onKeyDown={(e) => e.key === "Enter" && name.trim() && onDone(name.trim())}
+          />
         </div>
-      </div>
-      <div className="flex gap-2 pt-2">
         <button
-          onClick={onCancel}
-          className="flex-1 px-3 py-2.5 rounded text-sm font-medium border"
-          style={{ borderColor: BORDER, color: NAVY }}
-        >
-          Annuler
-        </button>
-        <button
-          onClick={onAdd}
-          disabled={!newTagName.trim()}
-          className="flex-1 px-3 py-2.5 rounded text-sm font-semibold text-white disabled:opacity-50"
+          type="button"
+          disabled={!name.trim()}
+          onClick={() => onDone(name.trim())}
+          className="w-full px-3 py-2.5 rounded text-sm font-semibold text-white disabled:opacity-50"
           style={{ background: NAVY }}
         >
-          Ajouter
+          Commencer
         </button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
-function SettingsForm({ settings, setSettings, userName, setUserName, syncUrl, setSyncUrl, loadFromCloud, syncStatus, onClose }) {
-  const [section, setSection] = useState("general");
+function AddTagModal({ onClose, onAdd }) {
+  const [name, setName] = useState("");
+  const [color, setColor] = useState(COLOR_PALETTE[0]);
   return (
-    <div className="space-y-4">
-      <div className="flex gap-1 p-1 rounded" style={{ background: LIGHT }}>
-        {[
-          { id: "general", label: "Général" },
-          { id: "grid", label: "Grille" },
-          { id: "cloud", label: "☁️ Cloud" },
-        ].map(s => (
-          <button
-            key={s.id}
-            onClick={() => setSection(s.id)}
-            className="flex-1 text-xs py-1.5 rounded font-medium transition"
-            style={{
-              background: section === s.id ? "white" : "transparent",
-              color: section === s.id ? NAVY : TEXT_DIM,
-            }}
-          >
-            {s.label}
-          </button>
-        ))}
-      </div>
-
-      {section === "general" && (
-        <div className="space-y-3">
-          <div>
-            <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-              <User size={12} className="inline mr-1" /> Nom de l'utilisateur
-            </label>
-            <input
-              type="text"
-              value={userName}
-              onChange={(e) => setUserName(e.target.value)}
-              className="w-full px-3 py-2 border rounded text-sm"
-              style={{ borderColor: BORDER }}
-            />
+    <Modal title="Nouvelle catégorie" onClose={onClose}>
+      <div className="space-y-4">
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+            Nom
+          </label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && name.trim() && onAdd(name, color)}
+            autoFocus
+            placeholder="Ex : Saisie BL"
+            className="w-full px-3 py-2.5 border rounded text-sm"
+            style={{ borderColor: BORDER }}
+          />
+        </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide block mb-2" style={{ color: NAVY }}>
+            Couleur
+          </label>
+          <div className="flex flex-wrap gap-2">
+            {COLOR_PALETTE.map(c => (
+              <button
+                type="button"
+                key={c}
+                onClick={() => setColor(c)}
+                className="w-8 h-8 rounded border-2 transition"
+                style={{
+                  background: c,
+                  borderColor: color === c ? NAVY : "transparent",
+                }}
+                aria-label={`Couleur ${c}`}
+              />
+            ))}
           </div>
         </div>
-      )}
+        <div className="flex gap-2 pt-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 px-3 py-2.5 rounded text-sm font-medium border"
+            style={{ borderColor: BORDER, color: NAVY }}
+          >
+            Annuler
+          </button>
+          <button
+            type="button"
+            onClick={() => name.trim() && onAdd(name, color)}
+            disabled={!name.trim()}
+            className="flex-1 px-3 py-2.5 rounded text-sm font-semibold text-white disabled:opacity-50"
+            style={{ background: NAVY }}
+          >
+            Ajouter
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
 
-      {section === "grid" && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-                Heure de début
-              </label>
-              <select
-                value={settings.startHour}
-                onChange={(e) => setSettings({ ...settings, startHour: parseInt(e.target.value) })}
-                className="w-full px-3 py-2 border rounded text-sm"
-                style={{ borderColor: BORDER }}
-              >
-                {Array.from({ length: 24 }, (_, i) => (
-                  <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-                Heure de fin
-              </label>
-              <select
-                value={settings.endHour}
-                onChange={(e) => setSettings({ ...settings, endHour: parseInt(e.target.value) })}
-                className="w-full px-3 py-2 border rounded text-sm"
-                style={{ borderColor: BORDER }}
-              >
-                {Array.from({ length: 24 }, (_, i) => i + 1).map(i => (
-                  <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
-                ))}
-              </select>
-            </div>
-          </div>
+function SettingsModal({ settings, setSettings, userName, setUserName, onClose }) {
+  return (
+    <Modal title="Paramètres" onClose={onClose} wide>
+      <div className="space-y-4">
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+            <User size={12} className="inline mr-1" /> Nom de l'utilisateur
+          </label>
+          <input
+            type="text"
+            value={userName}
+            onChange={(e) => setUserName(e.target.value)}
+            className="w-full px-3 py-2 border rounded text-sm"
+            style={{ borderColor: BORDER }}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-              Granularité
+              Heure de début
             </label>
             <select
-              value={settings.slotMinutes}
-              onChange={(e) => setSettings({ ...settings, slotMinutes: parseInt(e.target.value) })}
+              value={settings.startHour}
+              onChange={(e) => setSettings({ ...settings, startHour: parseInt(e.target.value) })}
               className="w-full px-3 py-2 border rounded text-sm"
               style={{ borderColor: BORDER }}
             >
-              <option value={15}>15 min (précis)</option>
-              <option value={30}>30 min (recommandé)</option>
-              <option value={60}>1 heure (rapide)</option>
+              {Array.from({ length: 24 }, (_, i) => (
+                <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
+              ))}
             </select>
-          </div>
-          <div className="text-xs p-3 rounded" style={{ background: LIGHT, color: TEXT_DIM }}>
-            ⚠️ Modifier la granularité ne réinterprète pas les saisies déjà faites.
-          </div>
-        </div>
-      )}
-
-      {section === "cloud" && (
-        <div className="space-y-3">
-          <div className="text-xs p-3 rounded" style={{ background: `${BLUE}10`, color: NAVY, lineHeight: 1.5 }}>
-            <strong>Synchronisation Google Sheets :</strong> tes données sont automatiquement enregistrées dans <strong>ton</strong> Google Sheet. Multi-utilisateurs, multi-appareils. Suivre la procédure d'installation (5 min) puis coller l'URL ci-dessous.
           </div>
           <div>
             <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
-              URL du script Google Apps Script
+              Heure de fin
             </label>
-            <input
-              type="url"
-              value={syncUrl}
-              onChange={(e) => setSyncUrl(e.target.value)}
-              placeholder="https://script.google.com/macros/s/.../exec"
-              className="w-full px-3 py-2 border rounded text-xs font-mono"
+            <select
+              value={settings.endHour}
+              onChange={(e) => setSettings({ ...settings, endHour: parseInt(e.target.value) })}
+              className="w-full px-3 py-2 border rounded text-sm"
               style={{ borderColor: BORDER }}
-            />
+            >
+              {Array.from({ length: 24 }, (_, i) => i + 1).map(i => (
+                <option key={i} value={i}>{String(i).padStart(2, "0")}:00</option>
+              ))}
+            </select>
           </div>
-          <button
-            onClick={loadFromCloud}
-            disabled={!syncUrl || syncStatus === "syncing"}
-            className="w-full px-3 py-2.5 rounded text-sm font-medium flex items-center justify-center gap-2 border disabled:opacity-50"
-            style={{ borderColor: BLUE, color: BLUE, background: "white" }}
-          >
-            <RefreshCw size={14} className={syncStatus === "syncing" ? "animate-spin" : ""} />
-            Restaurer depuis Google Sheets
-          </button>
-          <p className="text-xs" style={{ color: TEXT_DIM }}>
-            La sauvegarde s'effectue automatiquement à chaque modification (1,5 sec après).
-          </p>
         </div>
-      )}
 
-      <button
-        onClick={onClose}
-        className="w-full px-3 py-2.5 rounded text-sm font-semibold text-white"
-        style={{ background: NAVY }}
-      >
-        Fermer
-      </button>
-    </div>
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide block mb-1" style={{ color: NAVY }}>
+            Granularité
+          </label>
+          <select
+            value={settings.slotMinutes}
+            onChange={(e) => setSettings({ ...settings, slotMinutes: parseInt(e.target.value) })}
+            className="w-full px-3 py-2 border rounded text-sm"
+            style={{ borderColor: BORDER }}
+          >
+            <option value={15}>15 min (précis)</option>
+            <option value={30}>30 min (recommandé)</option>
+            <option value={60}>1 heure (rapide)</option>
+          </select>
+        </div>
+
+        <div className="text-xs p-3 rounded" style={{ background: LIGHT, color: TEXT_DIM, lineHeight: 1.5 }}>
+          ⚠️ Modifier la granularité ne réinterprète pas les saisies déjà faites.<br />
+          💾 Les données sont sauvegardées dans ton navigateur. Pour partager les données, utiliser l'export CSV.
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="w-full px-3 py-2.5 rounded text-sm font-semibold text-white"
+          style={{ background: NAVY }}
+        >
+          Fermer
+        </button>
+      </div>
+    </Modal>
   );
 }
 
@@ -1260,8 +1094,8 @@ function Modal({ children, onClose, title, hideClose, wide }) {
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-base font-bold" style={{ color: NAVY }}>{title}</h3>
           {!hideClose && (
-            <button onClick={onClose} className="p-1 hover:bg-slate-100 rounded">
-              <X size={18} style={{ color: TEXT_DIM }} />
+            <button type="button" onClick={onClose} className="p-1 hover:bg-slate-100 rounded" aria-label="Fermer">
+              <X size={18} style={{ color: TEXT_DIM, pointerEvents: "none" }} />
             </button>
           )}
         </div>
@@ -1296,6 +1130,7 @@ function ConfirmDialog({ title, message, confirmLabel = "Confirmer", cancelLabel
         </div>
         <div className="flex gap-2">
           <button
+            type="button"
             onClick={onClose}
             className="flex-1 px-3 py-2.5 rounded text-sm font-medium border"
             style={{ borderColor: BORDER, color: NAVY, background: "white" }}
@@ -1303,6 +1138,7 @@ function ConfirmDialog({ title, message, confirmLabel = "Confirmer", cancelLabel
             {cancelLabel}
           </button>
           <button
+            type="button"
             onClick={() => { onConfirm(); onClose(); }}
             className="flex-1 px-3 py-2.5 rounded text-sm font-semibold text-white"
             style={{ background: danger ? ERROR : NAVY }}
