@@ -468,7 +468,7 @@ export default function App() {
               style={{ background: LIGHT }}
               aria-label="Jour précédent"
             >
-              <ChevronLeft size={20} style={{ color: NAVY }} />
+              <ChevronLeft size={20} style={{ color: NAVY, pointerEvents: "none" }} />
             </button>
 
             <div className="flex-1 min-w-0 text-center">
@@ -504,7 +504,7 @@ export default function App() {
               style={{ background: LIGHT }}
               aria-label="Jour suivant"
             >
-              <ChevronRight size={20} style={{ color: NAVY }} />
+              <ChevronRight size={20} style={{ color: NAVY, pointerEvents: "none" }} />
             </button>
           </div>
         </div>
